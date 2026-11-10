@@ -96,6 +96,12 @@ def main() -> None:
         st.error(f"Could not load market data: {exc}")
         st.stop()
 
+    st.info(
+        "All charts, indicators and the summary below are calculated using "
+        "only fully closed candles. The most recent, still-forming candle "
+        "is excluded to avoid misleading signals."
+    )
+
     col_chart, col_summary = st.columns([3, 1])
 
     with col_chart:
@@ -104,6 +110,10 @@ def main() -> None:
         st.plotly_chart(render_macd_chart(df), use_container_width=True)
 
     with col_summary:
+        st.caption(
+            "Indicators and summary use only fully closed candles. "
+            f"Latest completed candle (UTC): {df.index[-1]}"
+        )
         st.subheader("Technical Summary")
         st.text(generate_summary(df, symbol))
 

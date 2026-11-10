@@ -13,6 +13,7 @@ DEFAULT_INTERVAL = "1h"
 DEFAULT_LIMIT = 300
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_SERVER_TIME_URL = "https://api.binance.com/api/v3/time"
 REQUEST_TIMEOUT_SECONDS = 10
 
 EMA_SHORT_PERIOD = 20
