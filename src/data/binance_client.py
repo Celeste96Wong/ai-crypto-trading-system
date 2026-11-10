@@ -90,6 +90,14 @@ def fetch_ohlcv(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
             f"Unsupported symbol '{symbol}'. Supported symbols: {SUPPORTED_SYMBOLS}"
         )
 
+    # Fetch the server clock before requesting klines. A candle could
+    # otherwise close in the gap between the klines request and a
+    # later time request, making a still-forming candle look closed.
+    # Fetching the clock first means the comparison timestamp is always
+    # at or before the candles' actual request time, so a forming
+    # candle is never mistaken for a completed one.
+    server_time_utc = _get_server_time_utc()
+
     params = {"symbol": symbol, "interval": interval, "limit": limit}
 
     try:
@@ -122,7 +130,6 @@ def fetch_ohlcv(symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
             f"Failed to parse Binance API response for {symbol}: {exc}"
         ) from exc
 
-    server_time_utc = _get_server_time_utc()
     completed = df[df["close_time"] <= server_time_utc]
 
     if completed.empty:

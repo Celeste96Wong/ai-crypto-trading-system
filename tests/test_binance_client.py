@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 import requests
 
+from src.config import BINANCE_KLINES_URL, BINANCE_SERVER_TIME_URL
 from src.data.binance_client import BinanceClientError, fetch_ohlcv
 
 
@@ -156,3 +157,26 @@ def test_fetch_ohlcv_falls_back_to_local_utc_clock_if_server_time_unavailable(mo
     df = fetch_ohlcv("BTCUSDT", "1h", limit=1)
 
     assert len(df) == 1
+
+
+@patch("src.data.binance_client.requests.get")
+def test_fetch_ohlcv_requests_server_time_before_klines(mock_get):
+    """The server clock must be read before klines are requested, so a
+    candle cannot close in the gap between the two requests and be
+    mistaken for one that was already closed when klines were fetched."""
+    closed_row = _make_kline_row(1700000000000, 1700003599999)
+
+    def _side_effect(url, *args, **kwargs):
+        if url == BINANCE_SERVER_TIME_URL:
+            return _mock_response({"serverTime": 1700003599999 + 1_000})
+        if url == BINANCE_KLINES_URL:
+            return _mock_response([closed_row])
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    mock_get.side_effect = _side_effect
+
+    df = fetch_ohlcv("BTCUSDT", "1h", limit=1)
+
+    assert len(df) == 1
+    requested_urls = [call.args[0] for call in mock_get.call_args_list]
+    assert requested_urls == [BINANCE_SERVER_TIME_URL, BINANCE_KLINES_URL]
