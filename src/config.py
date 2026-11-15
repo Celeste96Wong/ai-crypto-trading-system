@@ -21,18 +21,27 @@ REQUEST_TIMEOUT_SECONDS = 10
 # retries so a single request can never hang or loop indefinitely.
 MAX_RETRIES = 2
 
-# Binance uses these status codes specifically for rate limiting / IP bans.
-RATE_LIMIT_STATUS_CODES = (429, 418)
+# HTTP 429 ("too many requests") is Binance's ordinary rate limit: a
+# bounded retry is appropriate, honoring the Retry-After header.
+RATE_LIMIT_RETRYABLE_STATUS_CODES = (429,)
+
+# HTTP 418 means Binance has automatically banned this IP address. Per
+# Binance's docs, this must NOT be retried automatically - only 429 is
+# retried. 418 always fails immediately (see _request_with_retry).
+IP_BAN_STATUS_CODES = (418,)
 
 # Transient server-side errors that are worth a short retry.
 RETRYABLE_SERVER_ERROR_STATUS_CODES = (500, 502, 503, 504)
 
-# Used when Binance rate-limits a request without sending a Retry-After
-# header, and as the wait between retries on a transient server error.
+# Used when Binance rate-limits a request (429) without sending a
+# Retry-After header, and as the wait between retries on a transient
+# server error.
 DEFAULT_RETRY_AFTER_SECONDS = 1.0
 
-# Upper bound on how long we will ever wait because of a Retry-After
-# header, so a malformed or unexpectedly large value cannot stall the app.
+# The longest we will ever wait automatically because of a Retry-After
+# header. If Binance asks for a longer wait than this, we fail
+# immediately and report the required wait rather than retrying sooner
+# than Binance permits.
 MAX_RETRY_AFTER_SECONDS = 10.0
 
 EMA_SHORT_PERIOD = 20

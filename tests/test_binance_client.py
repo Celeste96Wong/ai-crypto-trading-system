@@ -10,7 +10,12 @@ from src.config import (
     MAX_RETRIES,
     SUPPORTED_INTERVALS,
 )
-from src.data.binance_client import BinanceClientError, BinanceRateLimitError, fetch_ohlcv
+from src.data.binance_client import (
+    BinanceClientError,
+    BinanceRateLimitError,
+    _request_with_retry,
+    fetch_ohlcv,
+)
 
 
 def _make_kline_row(open_time_ms, close_time_ms, close_price="102.0"):
@@ -248,18 +253,47 @@ def test_fetch_ohlcv_retries_on_429_then_succeeds(mock_get, mock_sleep):
 
 @patch("src.data.binance_client.time.sleep")
 @patch("src.data.binance_client.requests.get")
-def test_fetch_ohlcv_retries_on_418_then_succeeds(mock_get, mock_sleep):
-    close_time_ms = 1700003599999
-    closed_row = _make_kline_row(1700000000000, close_time_ms)
-    ok_time_response = _mock_response({"serverTime": close_time_ms + 1_000})
-    banned_response = _mock_response([], status_code=418, headers={"Retry-After": "0"})
-    ok_klines_response = _mock_response([closed_row])
-    mock_get.side_effect = [ok_time_response, banned_response, ok_klines_response]
+def test_request_with_retry_raises_immediately_on_418_with_one_attempt(mock_get, mock_sleep):
+    """HTTP 418 means Binance has banned this IP. Per Binance's docs,
+    only 429 is meant to be retried - 418 must fail on the very first
+    attempt, with no sleep and no further requests."""
+    mock_get.return_value = _mock_response([], status_code=418, headers={"Retry-After": "30"})
 
-    df = fetch_ohlcv("BTCUSDT", "1h", limit=1)
+    with pytest.raises(BinanceRateLimitError):
+        _request_with_retry(BINANCE_KLINES_URL, context="test")
 
-    assert len(df) == 1
-    assert mock_get.call_count == 3
+    assert mock_get.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_request_with_retry_418_message_includes_retry_after_duration():
+    with patch("src.data.binance_client.requests.get") as mock_get:
+        mock_get.return_value = _mock_response(
+            [], status_code=418, headers={"Retry-After": "45"}
+        )
+
+        with pytest.raises(BinanceRateLimitError) as exc_info:
+            _request_with_retry(BINANCE_KLINES_URL, context="test")
+
+    assert "45" in str(exc_info.value)
+
+
+@patch("src.data.binance_client.time.sleep")
+@patch("src.data.binance_client.requests.get")
+def test_fetch_ohlcv_raises_immediately_on_418_without_retry(mock_get, mock_sleep):
+    """End-to-end: a 418 on the klines request must not be retried, and
+    no subsequent request should be made after it."""
+    ok_time_response = _mock_response({"serverTime": 1700003599999 + 1_000})
+    banned_response = _mock_response([], status_code=418, headers={"Retry-After": "120"})
+    mock_get.side_effect = [ok_time_response, banned_response]
+
+    with pytest.raises(BinanceRateLimitError) as exc_info:
+        fetch_ohlcv("BTCUSDT", "1h", limit=1)
+
+    # Exactly 1 server-time call + exactly 1 klines call (no retry on 418).
+    assert mock_get.call_count == 2
+    mock_sleep.assert_not_called()
+    assert "120" in str(exc_info.value)
 
 
 @patch("src.data.binance_client.time.sleep")
@@ -312,18 +346,23 @@ def test_fetch_ohlcv_respects_retry_after_header(mock_get, mock_sleep):
 
 @patch("src.data.binance_client.time.sleep")
 @patch("src.data.binance_client.requests.get")
-def test_fetch_ohlcv_caps_an_excessive_retry_after_header(mock_get, mock_sleep):
-    close_time_ms = 1700003599999
-    closed_row = _make_kline_row(1700000000000, close_time_ms)
-    ok_time_response = _mock_response({"serverTime": close_time_ms + 1_000})
-    # A Retry-After far beyond what we should ever wait.
-    rate_limited_response = _mock_response([], status_code=429, headers={"Retry-After": "600"})
-    ok_klines_response = _mock_response([closed_row])
-    mock_get.side_effect = [ok_time_response, rate_limited_response, ok_klines_response]
+def test_request_with_retry_429_with_excessive_retry_after_fails_immediately(
+    mock_get, mock_sleep
+):
+    """A Retry-After far beyond our acceptable wait must never be
+    silently capped and retried early - that would mean retrying
+    sooner than Binance permits. It must fail immediately instead,
+    reporting the real required wait."""
+    mock_get.return_value = _mock_response(
+        [], status_code=429, headers={"Retry-After": "600"}
+    )
 
-    fetch_ohlcv("BTCUSDT", "1h", limit=1)
+    with pytest.raises(BinanceRateLimitError) as exc_info:
+        _request_with_retry(BINANCE_KLINES_URL, context="test")
 
-    mock_sleep.assert_called_once_with(10.0)
+    assert mock_get.call_count == 1
+    mock_sleep.assert_not_called()
+    assert "600" in str(exc_info.value)
 
 
 @patch("src.data.binance_client.time.sleep")
@@ -341,3 +380,64 @@ def test_get_server_time_falls_back_after_exhausting_retries(mock_get, mock_slee
     df = fetch_ohlcv("BTCUSDT", "1h", limit=1)
 
     assert len(df) == 1
+
+
+# --- Sanitized error messages (PR review fix) ---
+#
+# No credentials are ever used in this project, but error messages must
+# still be plain, user-facing text: never raw exception text, response
+# bodies, or other request/response internals.
+
+
+@patch("src.data.binance_client.time.sleep")
+@patch("src.data.binance_client.requests.get")
+def test_network_error_message_hides_raw_exception_text(mock_get, mock_sleep):
+    sensitive_detail = "internal-debug-detail-9f3c"
+    mock_get.side_effect = requests.exceptions.ConnectionError(sensitive_detail)
+
+    with pytest.raises(BinanceClientError) as exc_info:
+        fetch_ohlcv("BTCUSDT", "1h", limit=5)
+
+    assert sensitive_detail not in str(exc_info.value)
+
+
+@patch("src.data.binance_client.requests.get")
+def test_http_error_message_hides_raw_exception_text(mock_get):
+    raw_body_marker = "raw-response-body-marker-xyz"
+    response = _mock_response([], status_ok=False, status_code=403)
+    response.raise_for_status.side_effect = requests.exceptions.HTTPError(raw_body_marker)
+    mock_get.return_value = response
+
+    with pytest.raises(BinanceClientError) as exc_info:
+        fetch_ohlcv("BTCUSDT", "1h", limit=5)
+
+    assert raw_body_marker not in str(exc_info.value)
+
+
+@patch("src.data.binance_client.requests.get")
+def test_invalid_json_message_hides_raw_exception_text(mock_get):
+    raw_body_snippet = "raw-body-snippet-not-json-qwer"
+    response = _mock_response([])
+    response.json.side_effect = ValueError(raw_body_snippet)
+    mock_get.return_value = response
+
+    with pytest.raises(BinanceClientError) as exc_info:
+        fetch_ohlcv("BTCUSDT", "1h", limit=5)
+
+    assert raw_body_snippet not in str(exc_info.value)
+
+
+@patch("src.data.binance_client._get_server_time_utc")
+@patch("src.data.binance_client.requests.get")
+def test_malformed_kline_data_message_hides_raw_value(mock_get, mock_server_time):
+    secret_looking_value = "not-a-number-super-secret-token"
+    malformed_row = _make_kline_row(
+        1700000000000, 1700003599999, close_price=secret_looking_value
+    )
+    mock_get.return_value = _mock_response([malformed_row])
+    mock_server_time.return_value = _server_time_at(1700003599999 + 1_000)
+
+    with pytest.raises(BinanceClientError) as exc_info:
+        fetch_ohlcv("BTCUSDT", "1h", limit=1)
+
+    assert secret_looking_value not in str(exc_info.value)
