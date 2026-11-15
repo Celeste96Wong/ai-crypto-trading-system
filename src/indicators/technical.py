@@ -7,6 +7,7 @@ directly as new DataFrame columns.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from src.config import (
@@ -38,11 +39,23 @@ def calculate_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    # avg_gain / avg_loss is 0/0 or x/0 whenever there has been no loss
+    # (or no gain) at all, which the plain formula below can't express.
+    # Handle those edge cases explicitly instead of dividing by zero:
+    #   - no gain and no loss at all -> neutral (50)
+    #   - gains but zero loss        -> maximally strong (100)
+    #   - losses but zero gain       -> maximally weak (0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
 
-    # Where there is no loss at all, RSI is defined as 100.
-    rsi = rsi.where(avg_loss != 0, 100.0)
+    no_movement = (avg_gain == 0) & (avg_loss == 0)
+    gains_only = (avg_gain > 0) & (avg_loss == 0)
+    losses_only = (avg_gain == 0) & (avg_loss > 0)
+
+    rsi = rsi.mask(no_movement, 50.0)
+    rsi = rsi.mask(gains_only, 100.0)
+    rsi = rsi.mask(losses_only, 0.0)
     return rsi
 
 
