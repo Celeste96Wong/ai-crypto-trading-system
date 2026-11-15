@@ -12,3 +12,7 @@ env/
 .cache/
 *.log
 .DS_Store
+data/
+*.db
+*.sqlite
+*.sqlite3
